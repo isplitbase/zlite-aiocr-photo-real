@@ -185,6 +185,10 @@ def _process_one(pdf_info, *, model, max_side, dpi, file_period, file_date, clas
         analygent.pop("_meta", None)
         result.update({
             "analygent": analygent,
+            # ai_raw: Claude AI のページごとの生応答 (PipelineKintouV7.extract_page の戻り値).
+            #   PHP 側 (zlite-aiocr-photo.php) で response_pdf カラムへ保存し、
+            #   後段で決算年月日 / 単位 などのメタ情報を抽出できるようにする。
+            "ai_raw": page_results,
             "records": len(analygent.get("list", [])),
             "cost_usd": round(cost, 4),
             "elapsed_sec": round(time.time() - t0, 1),

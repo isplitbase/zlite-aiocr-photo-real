@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import sys
 from typing import Optional
 
 from PIL import Image
@@ -49,6 +50,10 @@ class ClaudeClient(LLMClient):
         png = self._image_to_png_bytes(image)
         b64 = base64.standard_b64encode(png).decode("ascii")
 
+        # 診断ログ用 (BadRequest 発生時に画像サイズと相関させる)
+        img_w, img_h = image.size
+        img_bytes = len(png)
+
         kwargs = {
             "model": self._model,
             "max_tokens": max_tokens,
@@ -73,7 +78,41 @@ class ClaudeClient(LLMClient):
         if system:
             kwargs["system"] = system
 
-        msg = self._client.messages.create(**kwargs)
+        try:
+            msg = self._client.messages.create(**kwargs)
+        except Exception as e:
+            # Anthropic SDK の BadRequestError などには .body / .status_code が付く.
+            # tenacity 経由で RetryError にラップされる前に, 実エラー本文を Cloud Run ログに残す.
+            err_type = type(e).__name__
+            err_body = getattr(e, "body", None)
+            err_status = getattr(e, "status_code", None)
+            err_response = getattr(e, "response", None)
+            err_msg = getattr(e, "message", None) or str(e)
+            mb = img_bytes / 1024 / 1024
+            print(
+                f"[claude.py] Anthropic API error: type={err_type} "
+                f"status={err_status} model={self._model} "
+                f"img_size={img_w}x{img_h} png_bytes={img_bytes} "
+                f"({mb:.2f}MB) "
+                f"msg={err_msg!r} body={err_body!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if err_response is not None:
+                # response がある場合は本文も出力 (HTTPレスポンス本体)
+                try:
+                    body_text = getattr(err_response, "text", None)
+                    if body_text is None and hasattr(err_response, "read"):
+                        body_text = err_response.read()
+                    print(
+                        f"[claude.py] response.body={body_text!r}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+
         # text content blocksを連結
         text = "".join(
             getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text"

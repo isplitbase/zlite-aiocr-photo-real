@@ -47,12 +47,14 @@ class ClaudeClient(LLMClient):
         temperature: float = 0.0,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        png = self._image_to_png_bytes(image)
-        b64 = base64.standard_b64encode(png).decode("ascii")
+        # JPEG エンコード (Anthropic の 5MB 制限回避).
+        # base.py 側で base64化後の 5MB 上限を超えないよう品質を自動調整する.
+        jpeg = self._image_to_jpeg_bytes(image, quality=90)
+        b64 = base64.standard_b64encode(jpeg).decode("ascii")
 
         # 診断ログ用 (BadRequest 発生時に画像サイズと相関させる)
         img_w, img_h = image.size
-        img_bytes = len(png)
+        img_bytes = len(jpeg)
 
         kwargs = {
             "model": self._model,
@@ -66,7 +68,7 @@ class ClaudeClient(LLMClient):
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": "image/png",
+                                "media_type": "image/jpeg",
                                 "data": b64,
                             },
                         },
@@ -92,14 +94,13 @@ class ClaudeClient(LLMClient):
             print(
                 f"[claude.py] Anthropic API error: type={err_type} "
                 f"status={err_status} model={self._model} "
-                f"img_size={img_w}x{img_h} png_bytes={img_bytes} "
+                f"img_size={img_w}x{img_h} jpeg_bytes={img_bytes} "
                 f"({mb:.2f}MB) "
                 f"msg={err_msg!r} body={err_body!r}",
                 file=sys.stderr,
                 flush=True,
             )
             if err_response is not None:
-                # response がある場合は本文も出力 (HTTPレスポンス本体)
                 try:
                     body_text = getattr(err_response, "text", None)
                     if body_text is None and hasattr(err_response, "read"):

@@ -43,37 +43,40 @@ class LLMClient(abc.ABC):
         ...
 
     @staticmethod
-    def _image_to_png_bytes(image: Image.Image) -> bytes:
-        """PNG ロスレスエンコード (gemini/openai 用)."""
-        buf = io.BytesIO()
-        image.convert("RGB").save(buf, format="PNG", optimize=True)
-        return buf.getvalue()
+    def _image_to_png_bytes(image: Image.Image, max_b64: int = 5_242_880) -> bytes:
+        """画像をバイト列に. API上限 (base64で5MB) を超える場合はJPEG化/段階縮小で収める.
 
-    @staticmethod
-    def _image_to_jpeg_bytes(
-        image: Image.Image,
-        quality: int = 90,
-        max_raw_bytes: int = 3_700_000,
-    ) -> bytes:
-        """JPEG エンコード (Anthropic Claude 用).
-
-        Anthropic API は base64 エンコード後の文字列サイズで 5MB (5,242,880 bytes)
-        を判定するため, raw bytes は 3,932,160 bytes 以下である必要がある.
-        余裕を見て max_raw_bytes=3,700,000 をデフォルト上限とし,
-        超える場合は品質を段階的に下げて再エンコードする.
-
-        写真コンテンツの場合 quality=90 で PNG の 1/5〜1/10 のサイズになるため,
-        通常は初回エンコードで上限内に収まる.
+        ★ API上限は base64エンコード後のサイズに適用される (生バイト×約4/3)。
+          そのため b64長で判定する。
+        高解像度 (鮮明さ) を保つため、まずPNG -> 超過ならJPEG高品質 ->
+        それでも超過なら品質/解像度を段階的に下げて上限以内にする。
         """
+        def _b64len(b: bytes) -> int:
+            return (len(b) + 2) // 3 * 4
+
         rgb = image.convert("RGB")
-        last_data = b""
-        for q in (quality, 85, 80, 70, 60, 50):
+        buf = io.BytesIO()
+        rgb.save(buf, format="PNG", optimize=True)
+        data = buf.getvalue()
+        if _b64len(data) <= max_b64:
+            return data
+
+        # PNGが大きすぎる -> JPEGで高品質エンコード (鮮明さ維持しつつ大幅減量)
+        for quality in (92, 88, 82, 75, 68):
             buf = io.BytesIO()
-            rgb.save(buf, format="JPEG", quality=q, optimize=True, progressive=False)
+            rgb.save(buf, format="JPEG", quality=quality)
             data = buf.getvalue()
-            last_data = data
-            if len(data) <= max_raw_bytes:
+            if _b64len(data) <= max_b64:
                 return data
-        # 最低品質でも超える場合はそのまま返す
-        # (Claude 側で 400 になるが claude.py のログには記録される)
-        return last_data
+
+        # まだ超過 -> 解像度を段階的に下げる (最後の手段)
+        img2 = rgb
+        for _ in range(6):
+            w, h = img2.size
+            img2 = img2.resize((int(w * 0.85), int(h * 0.85)), Image.LANCZOS)
+            buf = io.BytesIO()
+            img2.save(buf, format="JPEG", quality=85)
+            data = buf.getvalue()
+            if _b64len(data) <= max_b64:
+                return data
+        return data  # 何回縮小しても超過ならそのまま返す (稀)
